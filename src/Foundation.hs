@@ -9,22 +9,26 @@
 
 module Foundation where
 
-import           Control.Monad.Logger (LogSource)
-import           Data.Kind            (Type)
-import           Database.Persist.Sql (ConnectionPool, runSqlPool)
+import           Control.Monad.Logger          (LogSource)
+import           Data.Kind                     (Type)
+import           Database.Persist.Sql          (ConnectionPool, runSqlPool)
 import           Import.NoFoundation
-import           Text.Hamlet          (hamletFile)
-import           Text.Jasmine         (minifym)
+import           Text.Hamlet                   (hamletFile, shamletFile)
+import           Text.Jasmine                  (minifym)
+import           Text.Shakespeare.Text         (stextFile)
 
 -- Used only when in "auth-dummy-login" setting is enabled.
 import           Yesod.Auth.Dummy
 
-import qualified Data.CaseInsensitive as CI
-import qualified Data.Text.Encoding   as TE
-import           Yesod.Auth.OpenId    (IdentifierType (Claimed), authOpenId)
-import           Yesod.Core.Types     (Logger)
-import qualified Yesod.Core.Unsafe    as Unsafe
-import           Yesod.Default.Util   (addStaticContentExternal)
+import qualified Data.CaseInsensitive          as CI
+import           Data.String.Conversions       (cs)
+import qualified Data.Text.Encoding            as TE
+import           Network.Mail.Mime
+import           Text.Blaze.Html.Renderer.Utf8 (renderHtml)
+import           Yesod.Auth.Email
+import           Yesod.Core.Types              (Logger)
+import qualified Yesod.Core.Unsafe             as Unsafe
+import           Yesod.Default.Util            (addStaticContentExternal)
 
 -- | The foundation datatype for your application. This can be a good place to
 -- keep settings and values requiring initialization before your application
@@ -95,7 +99,7 @@ instance Yesod App where
     -- To add it, chain it together with the defaultMiddleware: yesodMiddleware = defaultYesodMiddleware . defaultCsrfMiddleware
     -- For details, see the CSRF documentation in the Yesod.Core.Handler module of the yesod-core package.
     yesodMiddleware :: ToTypedContent res => Handler res -> Handler res
-    yesodMiddleware = defaultYesodMiddleware
+    yesodMiddleware = defaultCsrfMiddleware . defaultYesodMiddleware
 
     defaultLayout :: Widget -> Handler Html
     defaultLayout widget = do
@@ -233,6 +237,8 @@ instance YesodPersistRunner App where
     getDBRunner :: Handler (DBRunner App, Handler ())
     getDBRunner = defaultGetDBRunner appConnPool
 
+instance YesodAuthPersist App
+
 instance YesodAuth App where
     type AuthId App = UserId
 
@@ -246,22 +252,74 @@ instance YesodAuth App where
     redirectToReferer :: App -> Bool
     redirectToReferer _ = True
 
+    authPlugins :: App -> [AuthPlugin App]
+    authPlugins app = [authEmail] ++ extraAuthPlugins
+        -- Enable authDummy login if enabled.
+        where extraAuthPlugins = [authDummy | appAuthDummyLogin $ appSettings app]
+
     authenticate :: (MonadHandler m, HandlerSite m ~ App)
                  => Creds App -> m (AuthenticationResult App)
     authenticate creds = liftHandler $ runDB $ do
-        x <- getBy $ UniqueUser $ credsIdent creds
-        case x of
-            Just (Entity uid _) -> return $ Authenticated uid
-            Nothing -> Authenticated <$> insert User
-                { userIdent = credsIdent creds
-                , userPassword = Nothing
-                }
+        x <- insertBy $ User (credsIdent creds) Nothing Nothing
+        return $ Authenticated $
+            case x of
+                Left (Entity uid _) -> uid -- existing user
+                Right uid           -> uid -- new user
 
-    -- You can add other plugins like Google Email, email or OAuth here
-    authPlugins :: App -> [AuthPlugin App]
-    authPlugins app = [authOpenId Claimed []] ++ extraAuthPlugins
-        -- Enable authDummy login if enabled.
-        where extraAuthPlugins = [authDummy | appAuthDummyLogin $ appSettings app]
+instance YesodAuthEmail App where
+    type AuthEmailId App = UserId
+
+    afterPasswordRoute _ = HomeR
+
+    addUnverified email verkey =
+        liftHandler $ runDB $ insert $ User email Nothing (Just verkey)
+
+    sendVerifyEmail email _ verurl = do
+        -- Print url to the console for debugging
+        liftIO $ putStrLn $ "Auth url: " ++ verurl
+
+        liftIO $ renderSendMail (emptyMail $ Address Nothing "noreply")
+            { mailTo = [Address Nothing email]
+            , mailHeaders =
+                [ ("Subject", "Verify your email address")
+                ]
+            , mailParts = [[plain, html]]
+            }
+      where
+        plain = plainPart $(stextFile "templates/email/auth.txt")
+        html = htmlPart $ cs $ renderHtml $(shamletFile "templates/email/auth.hamlet")
+
+    getVerifyKey = liftHandler . runDB . fmap (userVerkey =<<) . get
+    setVerifyKey uid key = liftHandler . runDB $ update uid [UserVerkey =. Just key]
+
+    getEmailCreds email = liftHandler . runDB $ do
+        mu <- getBy $ UniqueUser email
+        case mu of
+          Nothing -> return Nothing
+          Just (Entity uid u) -> return $ Just EmailCreds
+            { emailCredsId = uid
+            , emailCredsAuthId = Just uid
+            , emailCredsStatus = True
+            , emailCredsVerkey = userVerkey u
+            , emailCredsEmail = email
+            }
+
+    getEmail = liftHandler . runDB . fmap (fmap userEmail) . get
+
+    -- Clear verkey upon successful verification
+    -- If we don't do this, then the links will stay active forever, instead of
+    -- being invalidated after the first click.
+    verifyAccount uid = liftHandler . runDB $ do
+        mu <- get uid
+        case mu of
+          Nothing -> return Nothing
+          Just _ -> do
+              update uid [UserVerkey =. Nothing]
+              return $ Just uid
+
+    -- We're not actually working with passwords, just magic links.
+    getPassword _ = return Nothing
+    setPassword _ _ = return ()
 
 -- | Access function to determine if a user is logged in.
 isAuthenticated :: Handler AuthResult
@@ -270,8 +328,6 @@ isAuthenticated = do
     return $ case muid of
         Nothing -> Unauthorized "You must login to access this page"
         Just _  -> Authorized
-
-instance YesodAuthPersist App
 
 -- This instance is required to use forms. You can modify renderMessage to
 -- achieve customized and internationalized form validation messages.
@@ -288,11 +344,3 @@ instance HasHttpManager App where
 
 unsafeHandler :: App -> Handler a -> IO a
 unsafeHandler = Unsafe.fakeHandlerGetLogger appLogger
-
--- Note: Some functionality previously present in the scaffolding has been
--- moved to documentation in the Wiki. Following are some hopefully helpful
--- links:
---
--- https://github.com/yesodweb/yesod/wiki/Sending-email
--- https://github.com/yesodweb/yesod/wiki/Serve-static-files-from-a-separate-domain
--- https://github.com/yesodweb/yesod/wiki/i18n-messages-in-the-scaffolding
