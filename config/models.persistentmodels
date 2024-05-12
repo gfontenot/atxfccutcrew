@@ -11,3 +11,7 @@ Email
     userId UserId Maybe
     verkey Text Maybe
     UniqueEmail email
+Item
+    name Text
+    description Text Maybe
+    type ItemType
