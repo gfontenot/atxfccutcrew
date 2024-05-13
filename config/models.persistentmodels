@@ -13,5 +13,7 @@ Email
     UniqueEmail email
 Item
     name Text
-    description Text Maybe
+    description Textarea Maybe
     type ItemType
+    createdAt UTCTime default=CURRENT_TIMESTAMP
+    producedOn UTCTime default=CURRENT_TIMESTAMP
