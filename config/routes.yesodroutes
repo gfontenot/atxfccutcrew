@@ -8,3 +8,5 @@
 /robots.txt RobotsR GET
 
 / HomeR GET
+
+/items ItemsR GET POST

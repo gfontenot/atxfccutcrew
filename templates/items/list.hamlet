@@ -1,0 +1,19 @@
+<form method=post action=@{ItemsR} enctype=#{enctype}>
+  ^{form}
+  <button #submit>Submit
+
+<div .container>
+    <div .bs-docs-section>
+        <div .row>
+            <div .col-lg-12>
+                <div .page-header>
+                    <h1 #start>Recent Additions
+                    $forall Entity _ item <- items
+                        <div .item>
+                            <h2 .item-name>#{itemName item}
+                            $maybe desc <- itemDescription item
+                                <p .item-description>#{desc}
+                            <p .item-type>#{show $ itemType item}
+                            <p .item-creation-date>#{show $ itemCreatedAt item}
+                            <p .item-production-date>#{show $ itemProducedOn item}
+                        <hr>
